@@ -25,7 +25,7 @@ import torchvision
 from torchvision import models
 
 import torchaudio
-import torchaudio.transforms as T
+import torchaudio.transforms
 
 import torchtext
 from torchtext.data.utils import get_tokenizer
@@ -38,6 +38,8 @@ from torchmetrics.text import WordErrorRate as WER
 import csv
 
 # Arguments
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 root = 'M:/Git/Sound2Text/Dataset-LJSpeech'
 seed = 42
 
@@ -149,48 +151,44 @@ vocab = build_vocab_from_iterator(
     df_train.normalized_transcript.apply(lambda x: x.lower()),
     min_freq=10,
     specials=['=', '#', '<', '>'], special_first=True)
-
+    # = padding                 ,   # Unknone, 
+    # < start_of_sentence(sos)  ,   > end_of_sentence(eos)
 vocab.set_default_index(1)
 print(vocab.get_itos()) # ['=', '<', ' ', 'e', 't', 'a', ...
 len(sorted(vocab.get_itos())) # 43
 
 torch.save(vocab, 'vocab.pt')
 
+################################################################################
+# Compare the MelSpectrogram on CPU & GPU
+sample = df_train.iloc[0]
+waveform, sample_rate = torchaudio.load(sample['path'])#[1, 92829]
 
+waveform = waveform.repeat(100, 1, 1)#.to(device) # [100, 1, 92829]
 
+transform = torchaudio.transforms.MelSpectrogram(
+    sample_rate=sample_rate).requires_grad_(False)#.to(device)
 
-def plot_specgram(waveform, sample_rate, title="Spectrogram"):
-    waveform = waveform.numpy()
+n = 100
+start = torch.cuda.Event(enable_timing=True)
+end = torch.cuda.Event(enable_timing=True)
 
-    num_channels, num_frames = waveform.shape
+start.record()
+s = time.time()
 
-    figure, axes = plt.subplots(num_channels, 1)
-    if num_channels == 1:
-        axes = [axes]
-    for c in range(num_channels):
-        axes[c].specgram(waveform[c], Fs=sample_rate)
-        if num_channels > 1:
-            axes[c].set_ylabel(f"Channel {c+1}")
-    figure.suptitle(title)
+for i in range(n):
+  with torch.no_grad():
+    mel_specgram = transform(waveform)
 
-def plot_waveform(waveform, sample_rate):
-    waveform = waveform.numpy()
+end.record()
+torch.cuda.synchronize()
 
-    num_channels, num_frames = waveform.shape
-    time_axis = torch.arange(0, num_frames) / sample_rate
+print(start.elapsed_time(end)/n)# on GPU: 6.56ms / on CPU: 31.2
 
-    figure, axes = plt.subplots(num_channels, 1)
-    if num_channels == 1:
-        axes = [axes]
-    for c in range(num_channels):
-        axes[c].plot(time_axis, waveform[c], linewidth=1)
-        axes[c].grid(True)
-        if num_channels > 1:
-            axes[c].set_ylabel(f"Channel {c+1}")
-    figure.suptitle("waveform")
+print(1e3*(time.time()-s)/n)    # on GPU: 6.57ms / on CPU: 31.1
 
-plot_specgram(waveform, sample_rate)
-
+print(mel_specgram.shape) # [100, 1, 128, 465]
+################################################################################
 
 
 
