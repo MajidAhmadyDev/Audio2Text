@@ -1,0 +1,272 @@
+#%%
+import os
+import sys
+import time
+import math
+import random
+import tqdm
+from glob import glob
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from IPython.display import Audio
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+import librosa
+
+import torch
+from torch import nn
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset, random_split
+from torch import optim
+
+import torchvision
+from torchvision import models
+
+import torchaudio
+import torchaudio.transforms as T
+
+import torchtext
+from torchtext.data.utils import get_tokenizer
+from torchtext.vocab import build_vocab_from_iterator
+
+import torchmetrics as tm
+from torchmetrics.aggregation import MeanMetric
+from torchmetrics.text import WordErrorRate as WER
+
+import csv
+
+# Arguments
+root = 'M:/Git/Sound2Text/Dataset-LJSpeech'
+seed = 42
+
+
+# Load Dataset
+df = pd.read_csv(f'{root}/metadata.csv', 
+                 delimiter='|', 
+                 names=['id', 'transcript', 'normalized_transcript'],
+                 quoting=csv.QUOTE_NONE)
+df.describe()
+df.head()
+df.shape # (13100, 3)
+
+# check Nan
+df.isna().sum()
+
+# check Duplicated
+duplicates = df[df.transcript.duplicated(keep=False)].reset_index()
+
+df['path'] = df['id'].apply(lambda x: f'{root}/wavs/{x}.wav') # (13100, 4)
+
+# test a record
+wav_id = random.randint(0, df.shape[0]-1)
+wav_id, txt, norm_txt, wav_path = df.iloc[wav_id]
+print(wav_id, txt, norm_txt, sep='\n')
+
+waveform, sample_rate = torchaudio.load(wav_path)
+print(waveform.shape, 
+      waveform.dtype, 
+      sample_rate, sep='\n', end='\n\n') # [1, 222621] , torch.float32, 22050
+Audio(data=waveform, rate=sample_rate)
+
+# Create train, validation, and test subsets from the dataset
+generator = torch.Generator().manual_seed(seed)
+train, valid, test = random_split(df,               # from torch.utils.data
+                                  lengths=[0.75, 0.10, 0.15], 
+                                  generator=generator)
+# train.dataset, train.indices
+len(train) # 9825
+len(valid) # 1310
+len(test)  # 1965
+
+df_train = df.iloc[train.indices]
+print(df_train.shape) # (9825, 4)
+df_train.to_csv(f'{root}/train-subset.csv', index=False)
+
+df_valid = df.iloc[valid.indices]
+print(df_valid.shape) # (1310, 4)
+df_valid.to_csv(f'{root}/valid-subset.csv', index=False)
+
+df_test = df.iloc[test.indices]
+print(df_test.shape) # (1965, 4)
+df_test.to_csv(f'{root}/test-subset.csv', index=False)
+
+
+################################   Main to run ################################
+# Load csv and test & visualize it and Build a vocab
+def plot_specgram(waveform, sample_rate, title="Spectrogram"):
+    waveform = waveform.numpy()
+    num_channels, num_frames = waveform.shape
+
+    figure, axes = plt.subplots(num_channels, 1)
+    if num_channels == 1:
+        axes = [axes]
+    for c in range(num_channels):
+        axes[c].specgram(waveform[c], Fs=sample_rate)
+        if num_channels > 1:
+            axes[c].set_ylabel(f"Channel {c+1}")
+    figure.suptitle(title)
+
+def plot_waveform(waveform, sample_rate):
+    waveform = waveform.numpy()
+    num_channels, num_frames = waveform.shape
+    time_axis = torch.arange(0, num_frames) / sample_rate
+
+    figure, axes = plt.subplots(num_channels, 1)
+    if num_channels == 1:
+        axes = [axes]
+    for c in range(num_channels):
+        axes[c].plot(time_axis, waveform[c], linewidth=1)
+        axes[c].grid(True)
+        if num_channels > 1:
+            axes[c].set_ylabel(f"Channel {c+1}")
+    figure.suptitle("waveform")
+
+# Load train_csv
+df_train = pd.read_csv(f'{root}/train-subset.csv')
+
+# Test after load df_train
+df_train.head()
+idx = random.randint(0, len(df_train))
+sample = df_train.iloc[idx]
+waveform, sample_rate = torchaudio.load(sample['path'])
+# waveform: [1, 194717]  ,  sample_rate: 22050
+print(sample['transcript'])           # Accuracy of Weapon
+print(sample['normalized_transcript'])# Accuracy of Weapon
+Audio(data=waveform, rate=sample_rate)# from IPython.display
+
+plt.plot(waveform[0])
+
+plot_waveform(waveform, sample_rate)
+
+plot_specgram(waveform, sample_rate)
+
+
+# Build a vocab
+from torchtext.vocab import build_vocab_from_iterator
+vocab = build_vocab_from_iterator(
+    df_train.normalized_transcript.apply(lambda x: x.lower()),
+    min_freq=10,
+    specials=['=', '#', '<', '>'], special_first=True)
+
+vocab.set_default_index(1)
+print(vocab.get_itos()) # ['=', '<', ' ', 'e', 't', 'a', ...
+len(sorted(vocab.get_itos())) # 43
+
+torch.save(vocab, 'vocab.pt')
+
+
+
+
+def plot_specgram(waveform, sample_rate, title="Spectrogram"):
+    waveform = waveform.numpy()
+
+    num_channels, num_frames = waveform.shape
+
+    figure, axes = plt.subplots(num_channels, 1)
+    if num_channels == 1:
+        axes = [axes]
+    for c in range(num_channels):
+        axes[c].specgram(waveform[c], Fs=sample_rate)
+        if num_channels > 1:
+            axes[c].set_ylabel(f"Channel {c+1}")
+    figure.suptitle(title)
+
+def plot_waveform(waveform, sample_rate):
+    waveform = waveform.numpy()
+
+    num_channels, num_frames = waveform.shape
+    time_axis = torch.arange(0, num_frames) / sample_rate
+
+    figure, axes = plt.subplots(num_channels, 1)
+    if num_channels == 1:
+        axes = [axes]
+    for c in range(num_channels):
+        axes[c].plot(time_axis, waveform[c], linewidth=1)
+        axes[c].grid(True)
+        if num_channels > 1:
+            axes[c].set_ylabel(f"Channel {c+1}")
+    figure.suptitle("waveform")
+
+plot_specgram(waveform, sample_rate)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
