@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import librosa
 
 import torch
-from torch import nn
+from torch import nn, tensor
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, random_split
 from torch import optim
@@ -292,21 +292,148 @@ waveforms.shape, targets.shape # [64, 1, 220061] , [64, 176]
 targets[0]
 
 
+##################################   MODEL   ##########################################
+class CNN2DFeatureExtractor(nn.Module):
+  def __init__(self, input_channel=1, out_channels=[32, 64, 64]):
+    super().__init__()
+    self.layer1 = nn.Sequential(
+      nn.Conv2d(input_channel, out_channels[0], kernel_size=11, stride=1, padding=5),
+      nn.BatchNorm2d(out_channels[0]),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+    )
+    self.layer2 = nn.Sequential(
+      nn.Conv2d(out_channels[0], out_channels[1], kernel_size=11, stride=1, padding=5),
+      nn.BatchNorm2d(out_channels[1])
+    )
+    self.layer3 = nn.Sequential(
+      nn.Conv2d(out_channels[1], out_channels[2], kernel_size=11, stride=1, padding=5),
+      nn.BatchNorm2d(out_channels[2]),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=3, stride=(2,1), padding=1)
+    )
+  def forward(self, x): # [B, 1, 128, T] , channels is n_kernels = 1
+    print("1", x.shape) # [64, 1, 128, 804]
+    x = self.layer1(x)  # [B, out_channels[0], 128/2, 804/2]
+    print("2", x.shape) # [64, 32, 64, 402]
+
+    x = self.layer2(x)  # [B, out_channels[1], 64, 402]
+    print("3", x.shape) # [64, 64, 64, 402]
+
+    x = self.layer3(x) # [B, out_channels[2], 64/2, 402/1]
+    print("4", x.shape)# [64, 64, 32, 402]
+
+    return x
+
+
+class ResNetFeatureExtractor(nn.Module):
+
+  def __init__(self, ):
+    super().__init__()
+
+    self.model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+    module_list = [nn.Conv2d(1, 64, 7, stride=(2, 1), padding=3, bias=False)]
+    module_list += list(self.model.children())[1:-5]
+    module_list += [nn.Conv2d(64, 32, 1, bias=False), 
+                    nn.BatchNorm2d(32), 
+                    nn.ReLU(inplace=True)]
+    self.model = nn.Sequential(*module_list)
+
+  def forward(self, x):
+    # [64, 1, 128, 804] -> [64, 32, 32, 402]
+    x = self.model(x)
+    return x
+  
+# from https://pytorch.org/tutorials/beginner/transformer_tutorial.html  
+class PositionalEncoding(nn.Module):
+
+  def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+    super().__init__()
+    self.dropout = nn.Dropout(p=dropout)
+
+    position = torch.arange(max_len).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+    pe = torch.zeros(max_len, 1, d_model)
+    pe[:, 0, 0::2] = torch.sin(position * div_term)
+    pe[:, 0, 1::2] = torch.cos(position * div_term)
+    self.register_buffer('pe', pe)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """
+    Arguments:
+        x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+    """
+    x = x + self.pe[:x.size(0)]
+    return self.dropout(x)
+
+# test  
+pos_encoding = PositionalEncoding(d_model=128, )
+print(pos_encoding.pe.shape)
+pos_encoding(torch.randn(200, 2, 128)).shape  
+  
+  
+  
+  
+  
+  
+class Speech2Text(nn.Module):
+  def __init__(self, sample_rate, cnn_mode='resnet', out_channels=[32, 64, 64], planes=64):
+    super().__init__()
+    # PreProcessing
+    self.transform = nn.Sequential(
+      torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000),
+      torchaudio.transforms.MelSpectrogram(),
+      torchaudio.transforms.FrequencyMasking(freq_mask_param=15)
+    )
+    
+    # Feature embedding
+    self.cnn_mode = cnn_mode
+    if cnn_mode == 'simple':
+      self.cnn = CNN2DFeatureExtractor(input_channel=1, out_channels=out_channels)
+    elif cnn_mode == 'resnet':
+      self.cnn = ResNetFeatureExtractor()
+    else:
+      raise NotImplementedError("Please select one of the simple or resnet model")
+    
+  # [B, C, H, W] C: channels, H: height(n_mels), W: width(time_frames)
+  def forward(self, x):  # [64, 1, 221341] is [B, 1, T=(List of air_pressure in time)]
+    with torch.no_grad():
+      x = self.transform(x)# [B, 1, T] -> [B, 1, 128, 785] is [B, 1, n_mels, time_frames]
+    print("5", x.shape)  # [64, 1, 128, 804]
+    
+    #if self.cnn_mode == 'resnet':
+    #  x = x.repeat(1, 3, 1, 1) # [64, 1, 128, 804] -> [64, 3, 128, 804]
+    print("8", x.shape)
+    x = self.cnn(x)      
+    print("6", x.shape)  # if CNN2DFeatureExtractor -> [64, 64, 32, 402]
+                         # if ResNet18 -> [64, 32, 32, 402]
+    return x
+
+
+batch = next(iter(train_loader))
+batch[0].shape
+model = Speech2Text(22050).to(device)
+y = model(batch[0].to(device))
+y.shape # [64, 1, 128, 768]
+
+
+x = tensor(np.arange(1280), dtype=torch.float32).view(1,1,128,10) # [4, 1, 128, 10]
+x.shape
+
+model = nn.Conv2d(1, 64, kernel_size=11, stride=1, padding=5)
+y = model(x)
+y.shape # [1, 64, 128, 10]
+
+model = CNN2DFeatureExtractor()
+y = model(x)
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
+model = ResNetFeatureExtractor().to(device)
+with torch.no_grad():
+  out = model(torch.randn((2, 3, 80, 796), device=device))
+out.shape
 
 
 
