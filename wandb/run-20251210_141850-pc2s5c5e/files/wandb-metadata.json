@@ -1,0 +1,40 @@
+{
+  "os":  "Windows-10-10.0.26200-SP0",
+  "python":  "CPython 3.11.9",
+  "startedAt":  "2025-12-10T13:18:50.527022Z",
+  "program":  "m:\\Git\\Sound2Text\\Audio2Text\\wandb_sample.py",
+  "codePath":  "m:\\Git\\Sound2Text\\Audio2Text\\wandb_sample.py",
+  "codePathLocal":  "wandb_sample.py",
+  "git":  {
+    "remote":  "https://github.com/MajidAhmadyDev/Audio2Text.git",
+    "commit":  "e0b8663f83312ca915aadffc63382c63daa02293"
+  },
+  "email":  "majidahmady@outlook.com",
+  "root":  "m:\\Git\\Sound2Text\\Audio2Text",
+  "host":  "MSI",
+  "executable":  "m:\\VENV\\torch_env\\Scripts\\python.exe",
+  "cpu_count":  14,
+  "cpu_count_logical":  20,
+  "gpu":  "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "1049648689152",
+      "used":  "264056393728"
+    }
+  },
+  "memory":  {
+    "total":  "34045239296"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+      "memoryTotal":  "4294967296",
+      "cudaCores":  2560,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-fe948be5-718c-1b5d-5c03-0aacb3335b62"
+    }
+  ],
+  "cudaVersion":  "13.1",
+  "writerId":  "6veawl2ro5n0u3zntontek01pgmketkj"
+}

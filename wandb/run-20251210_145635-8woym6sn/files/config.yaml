@@ -1,0 +1,62 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            a5vnd1eu11va4or39cpx9un5tqomycua:
+                codePath: m:\Git\Sound2Text\Audio2Text\wandb_sample.py
+                codePathLocal: wandb_sample.py
+                cpu_count: 14
+                cpu_count_logical: 20
+                cudaVersion: "13.1"
+                disk:
+                    /:
+                        total: "1049648689152"
+                        used: "264056426496"
+                email: majidahmady@outlook.com
+                executable: m:\VENV\torch_env\Scripts\python.exe
+                git:
+                    commit: e0b8663f83312ca915aadffc63382c63daa02293
+                    remote: https://github.com/MajidAhmadyDev/Audio2Text.git
+                gpu: NVIDIA GeForce RTX 3050 Ti Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 2560
+                      memoryTotal: "4294967296"
+                      name: NVIDIA GeForce RTX 3050 Ti Laptop GPU
+                      uuid: GPU-fe948be5-718c-1b5d-5c03-0aacb3335b62
+                host: MSI
+                memory:
+                    total: "34045239296"
+                os: Windows-10-10.0.26200-SP0
+                program: m:\Git\Sound2Text\Audio2Text\wandb_sample.py
+                python: CPython 3.11.9
+                root: m:\Git\Sound2Text\Audio2Text
+                startedAt: "2025-12-10T13:56:35.250607Z"
+                writerId: a5vnd1eu11va4or39cpx9un5tqomycua
+        m: []
+        python_version: 3.11.9
+        t:
+            "1":
+                - 1
+                - 41
+            "2":
+                - 1
+                - 41
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.11.9
+            "5": 0.23.1
+            "8":
+                - 1
+                - 3
+            "12": 0.23.1
+            "13": windows-amd64
+batch_size:
+    value: 32
+epochs:
+    value: 10
+lr:
+    value: 0.001

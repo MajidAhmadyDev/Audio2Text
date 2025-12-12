@@ -1,0 +1,567 @@
+#%%
+import os
+import sys
+import time
+import math
+import random
+from pyparsing import C
+import tqdm
+from glob import glob
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from IPython.display import Audio
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+import librosa
+
+import torch
+from torch import nn, tensor
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset, random_split
+from torch import optim
+
+import torchvision
+from torchvision import models
+
+import torchaudio
+import torchaudio.transforms
+
+import torchtext
+from torchtext.data.utils import get_tokenizer
+from torchtext.vocab import build_vocab_from_iterator
+
+import torchmetrics as tm
+from torchmetrics.aggregation import MeanMetric
+from torchmetrics.text import WordErrorRate as WER
+
+import csv
+
+# Arguments
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+root = 'M:/Git/Sound2Text/Dataset-LJSpeech'
+seed = 42
+batch_size = 64
+
+# Load Dataset
+df = pd.read_csv(f'{root}/metadata.csv', 
+                 delimiter='|', 
+                 names=['id', 'transcript', 'normalized_transcript'],
+                 quoting=csv.QUOTE_NONE)
+df.describe()
+df.head()
+df.shape # (13100, 3)
+
+# check Nan
+df.isna().sum()
+
+# check Duplicated
+duplicates = df[df.transcript.duplicated(keep=False)].reset_index()
+
+df['path'] = df['id'].apply(lambda x: f'{root}/wavs/{x}.wav') # (13100, 4)
+
+# test a record
+wav_id = random.randint(0, df.shape[0]-1)
+wav_id, txt, norm_txt, wav_path = df.iloc[wav_id]
+print(wav_id, txt, norm_txt, sep='\n')
+
+waveform, sample_rate = torchaudio.load(wav_path)
+print(waveform.shape, 
+      waveform.dtype, 
+      sample_rate, sep='\n', end='\n\n') # [1, 222621] , torch.float32, 22050
+Audio(data=waveform, rate=sample_rate)
+
+# Create train, validation, and test subsets from the dataset
+generator = torch.Generator().manual_seed(seed)
+train, valid, test = random_split(df,               # from torch.utils.data
+                                  lengths=[0.75, 0.10, 0.15], 
+                                  generator=generator)
+# train.dataset, train.indices
+len(train) # 9825
+len(valid) # 1310
+len(test)  # 1965
+
+df_train = df.iloc[train.indices]
+print(df_train.shape) # (9825, 4)
+df_train.to_csv(f'{root}/train-subset.csv', index=False)
+
+df_valid = df.iloc[valid.indices]
+print(df_valid.shape) # (1310, 4)
+df_valid.to_csv(f'{root}/valid-subset.csv', index=False)
+
+df_test = df.iloc[test.indices]
+print(df_test.shape) # (1965, 4)
+df_test.to_csv(f'{root}/test-subset.csv', index=False)
+
+
+################################   Main to run ################################
+# Load csv and test & visualize it and Build a vocab
+def plot_specgram(waveform, sample_rate, title="Spectrogram"):
+    waveform = waveform.numpy()
+    num_channels, num_frames = waveform.shape
+
+    figure, axes = plt.subplots(num_channels, 1)
+    if num_channels == 1:
+        axes = [axes]
+    for c in range(num_channels):
+        axes[c].specgram(waveform[c], Fs=sample_rate)
+        if num_channels > 1:
+            axes[c].set_ylabel(f"Channel {c+1}")
+    figure.suptitle(title)
+
+def plot_waveform(waveform, sample_rate):
+    waveform = waveform.numpy()
+    num_channels, num_frames = waveform.shape
+    time_axis = torch.arange(0, num_frames) / sample_rate
+
+    figure, axes = plt.subplots(num_channels, 1)
+    if num_channels == 1:
+        axes = [axes]
+    for c in range(num_channels):
+        axes[c].plot(time_axis, waveform[c], linewidth=1)
+        axes[c].grid(True)
+        if num_channels > 1:
+            axes[c].set_ylabel(f"Channel {c+1}")
+    figure.suptitle("waveform")
+
+# Load train_csv
+df_train = pd.read_csv(f'{root}/train-subset.csv')
+
+# Test after load df_train
+df_train.head()
+idx = random.randint(0, len(df_train))
+sample = df_train.iloc[idx]
+waveform, sample_rate = torchaudio.load(sample['path'])
+# waveform: [1, 194717]  ,  sample_rate: 22050
+print(sample['transcript'])           # Accuracy of Weapon
+print(sample['normalized_transcript'])# Accuracy of Weapon
+Audio(data=waveform, rate=sample_rate)# from IPython.display
+
+plt.plot(waveform[0])
+
+plot_waveform(waveform, sample_rate)
+
+plot_specgram(waveform, sample_rate)
+
+
+# Build a vocab
+from torchtext.vocab import build_vocab_from_iterator
+vocab = build_vocab_from_iterator(
+    df_train.normalized_transcript.apply(lambda x: x.lower()),
+    min_freq=10,
+    specials=['=', '#', '<', '>'], special_first=True)
+    # = padding                 ,   # Unknone, 
+    # < start_of_sentence(sos)  ,   > end_of_sentence(eos)
+vocab.set_default_index(1)
+print(vocab.get_itos()) # ['=', '<', ' ', 'e', 't', 'a', ...
+len(sorted(vocab.get_itos())) # 43
+vocab(['<', 'a', 'c', '>'])   # [2, 7, 16, 3]
+torch.save(vocab, 'vocab.pt')
+
+################################################################################
+# Compare the MelSpectrogram on CPU & GPU
+sample = df_train.iloc[0]
+waveform, sample_rate = torchaudio.load(sample['path'])#[1, 92829]
+
+waveform = waveform.repeat(100, 1, 1)#.to(device) # [100, 1, 92829]
+
+transform = torchaudio.transforms.MelSpectrogram(
+    sample_rate=sample_rate).requires_grad_(False)#.to(device)
+
+n = 100
+start = torch.cuda.Event(enable_timing=True)
+end = torch.cuda.Event(enable_timing=True)
+
+start.record()
+s = time.time()
+
+for i in range(n):
+  with torch.no_grad():
+    mel_specgram = transform(waveform)
+
+end.record()
+torch.cuda.synchronize()
+
+print(start.elapsed_time(end)/n)# on GPU: 6.56ms / on CPU: 31.2
+
+print(1e3*(time.time()-s)/n)    # on GPU: 6.57ms / on CPU: 31.1
+
+print(mel_specgram.shape) # [100, 1, 128, 465]
+################################################################################
+
+# Calculate the time spent loading an audio file
+start = time.time()
+
+for path in df_train['path']:
+  waveform, sample_rate = torchaudio.load(path)
+
+end = time.time()
+
+print(f'{end-start:.2f}s', f"{1e3*(end-start)/len(df_train['path']):.2f} ms")
+
+# Calculate the total RAM occupation by dataset
+total_nbytes = 0
+
+for path in df_train['path']:
+  waveform, _ = torchaudio.load(path)
+  total_nbytes += waveform.nbytes
+
+print(f'{total_nbytes/1e6} GB')
+################################# From Here to run #####################################
+
+# Custom dataset
+class LJSpeechDataset(Dataset):
+  def __init__(self, root: str, csv_file: str,
+               input_transform: Optional[Callable] = None, # .MelSpectrogram(Voices)
+               target_transform: Optional[Callable] = None,# vocab(text)
+               memory: Optional[bool] = False):
+
+    self.data = pd.read_csv(os.path.join(root, csv_file))
+    self.phase = csv_file.split('-')[0].capitalize()
+    self.input_transform = input_transform # .MelSpectrogram shift in Model
+    self.target_transform = target_transform 
+    self.memory = memory
+
+    self.sos = target_transform(['<']) # 2
+    self.eos = target_transform(['>']) # 3
+
+    if memory:
+      self._save_memory()
+
+  def __len__(self):
+    return len(self.data)
+
+  def __getitem__(self, idx):
+    if self.memory:
+      waveform = self.audios[idx].clone().squeeze()
+    else:
+      waveform = torchaudio.load(self.data.iloc[idx, 3])[0].squeeze()
+
+    transcript = self.data.iloc[idx, 1]
+
+    #self.target_transform is equall vocab(['a', 'c']) -> [7, 16]
+    transcript = self.target_transform(list(transcript.lower()))
+    transcript = self.sos + transcript + self.eos
+    transcript = torch.LongTensor(transcript)
+
+    return waveform, transcript
+
+  def _save_memory(self):
+    self.audios = []
+    for path in self.data['path']:
+      self.audios.append(self._load_audio(path))
+
+  def _load_audio(self, path):
+    return torchaudio.load(path)[0] # 0: waveform, 1: sample_rate
+
+  def __repr__(self): # if print(train_set) will be displayed this
+    return f"""Number of Datapoints: {len(self.data)}\nPhase: {self.phase}"""
+
+
+vocab = torch.load('vocab.pt')
+train_set = LJSpeechDataset(root=root, csv_file='train-subset.csv',
+                            target_transform=vocab, memory=True)
+print(train_set) # Number of Datapoints: 9825  ,  Phase: Train
+
+valid_set = LJSpeechDataset(root=root, csv_file='valid-subset.csv', 
+                            target_transform=vocab, memory=True)
+
+test_set = LJSpeechDataset(root=root, csv_file='test-subset.csv', 
+                           target_transform=vocab, memory=False)
+
+wave1, text1 = train_set[1] # [129693] , [32413]
+wave2, text2 =train_set[2]  # [98]     , [26]
+
+# Dataloader
+# for add pad to waves & texts
+def collate_fn(batch):
+  x, y = zip(*batch)
+  x = torch.nn.utils.rnn.pad_sequence(x, batch_first=True, padding_value=0).unsqueeze(1)
+  y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=0)
+  return x, y
+
+generator = torch.Generator().manual_seed(42)
+train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, generator=generator)
+
+valid_loader = DataLoader(valid_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, generator=generator)
+
+test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, generator=generator)
+
+waveforms, targets = next(iter(train_loader))
+waveforms.shape, targets.shape # [64, 1, 220061] , [64, 176]
+targets[0]
+
+
+##################################   MODEL   ##########################################
+class CNN2DFeatureExtractor(nn.Module):
+  def __init__(self, input_channel=1, out_channels=[32, 64, 64]):
+    super().__init__()
+    self.layer1 = nn.Sequential(
+      nn.Conv2d(input_channel, out_channels[0], kernel_size=11, stride=1, padding=5),
+      nn.BatchNorm2d(out_channels[0]),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+    )
+    self.layer2 = nn.Sequential(
+      nn.Conv2d(out_channels[0], out_channels[1], kernel_size=11, stride=1, padding=5),
+      nn.BatchNorm2d(out_channels[1])
+    )
+    self.layer3 = nn.Sequential(
+      nn.Conv2d(out_channels[1], out_channels[2], kernel_size=11, stride=1, padding=5),
+      nn.BatchNorm2d(out_channels[2]),
+      nn.ReLU(),
+      nn.MaxPool2d(kernel_size=3, stride=(2,1), padding=1)
+    )
+  def forward(self, x): # [B, 1, 128, T] , channels is n_kernels = 1
+    print("1", x.shape) # [64, 1, 128, 804]
+    x = self.layer1(x)  # [B, out_channels[0], 128/2, 804/2]
+    print("2", x.shape) # [64, 32, 64, 402]
+
+    x = self.layer2(x)  # [B, out_channels[1], 64, 402]
+    print("3", x.shape) # [64, 64, 64, 402]
+
+    x = self.layer3(x) # [B, out_channels[2], 64/2, 402/1]
+    print("4", x.shape)# [64, 64, 32, 402]
+
+    return x
+
+
+class ResNetFeatureExtractor(nn.Module):
+
+  def __init__(self, ):
+    super().__init__()
+
+    self.model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+    module_list = [nn.Conv2d(1, 64, 7, stride=(2, 1), padding=3, bias=False)]
+    module_list += list(self.model.children())[1:-5]
+    module_list += [nn.Conv2d(64, 32, 1, bias=False), 
+                    nn.BatchNorm2d(32), 
+                    nn.ReLU(inplace=True)]
+    self.model = nn.Sequential(*module_list)
+
+  def forward(self, x):
+    # [64, 1, 128, 804] -> [64, 32, 32, 402]
+    x = self.model(x)
+    return x
+  
+# from https://pytorch.org/tutorials/beginner/transformer_tutorial.html  
+class PositionalEncoding(nn.Module):
+
+  def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+    super().__init__()
+    self.dropout = nn.Dropout(p=dropout)
+
+    position = torch.arange(max_len).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+    pe = torch.zeros(max_len, 1, d_model)
+    pe[:, 0, 0::2] = torch.sin(position * div_term)
+    pe[:, 0, 1::2] = torch.cos(position * div_term)
+    self.register_buffer('pe', pe)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """
+    Arguments:
+        x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+    """
+    x = x + self.pe[:x.size(0)]
+    return self.dropout(x)
+
+# test  
+pos_encoding = PositionalEncoding(d_model=128, )
+print(pos_encoding.pe.shape)
+pos_encoding(torch.randn(200, 2, 128)).shape  
+  
+  
+class TransformerModel(nn.Module):
+
+  def __init__(self, embed_dim, n_head, num_encoders, num_decoders, dim_feedforward,
+               len_vocab=43, dropout=0.1, activation=F.relu):
+    super().__init__()
+
+    self.embed_dim = embed_dim
+    # Embedding
+    #len_vocab = len(vocab)
+    self.embedding = nn.Embedding(len_vocab, embedding_dim=embed_dim, padding_idx=0)
+
+    # Position Encoding
+    self.pos_encoder = PositionalEncoding(d_model=embed_dim)
+
+    # Transformer
+    self.transformer = nn.Transformer(
+        d_model=embed_dim, nhead=n_head,
+        num_encoder_layers=num_encoders, num_decoder_layers=num_decoders,
+        dim_feedforward=dim_feedforward,
+        dropout=dropout, 
+        activation=activation
+        )
+
+    self.init_weights()
+
+  def init_weights(self) -> None:
+      initrange = 0.1
+      self.embedding.weight.data.uniform_(-initrange, initrange)
+
+  def forward(self, src, tgt): # src: Audio features, tgt: text token ids
+    tgt = self.embedding(tgt) * math.sqrt(self.embed_dim) # [B, L, D]
+
+    tgt = tgt.permute(1, 0, 2) #[L(seq_len), B(batch_size), D(embed_dim)]
+    # or tgt = tgt.permute(1, 0, 2) tgt.transpose(0, 1) or tgt = tgt.T
+    tgt = self.pos_encoder(tgt)
+
+    tgt_mask = nn.Transformer.generate_square_subsequent_mask(len(tgt)).to(device)
+    print("tgt_mask", tgt_mask.shape) # [L, L]   [159, 159]
+    print("src", src.shape)         # [S, B, D]  [404, 64, 1024]
+    print("tgt", tgt.shape)         # [L, B, D]  [159, 64, 1024]
+    out = self.transformer(src, tgt, tgt_mask=tgt_mask)
+
+    return out  
+  
+  
+class Speech2Text(nn.Module):
+  def __init__(self, len_vocab, d_model, n_head, num_encoders, num_decoders,
+                dim_feedforward, dropout, activation,
+               sample_rate, cnn_mode='resnet', out_channels=[32, 64, 64], planes=64):
+    super().__init__()
+    # PreProcessing
+    self.voice_transform = nn.Sequential(
+      torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000),
+      torchaudio.transforms.MelSpectrogram(),
+      torchaudio.transforms.FrequencyMasking(freq_mask_param=15)
+    )
+    
+    # Feature embedding
+    self.cnn_mode = cnn_mode
+    if cnn_mode == 'simple':
+      self.cnn = CNN2DFeatureExtractor(input_channel=1, out_channels=out_channels)
+    elif cnn_mode == 'resnet':
+      self.cnn = ResNetFeatureExtractor()
+    else:
+      raise NotImplementedError("Please select one of the simple or resnet model")
+  
+      # Transformer
+    self.transformers = TransformerModel(
+        embed_dim=d_model, n_head=n_head,
+        num_encoders=num_encoders, num_decoders= num_decoders,
+        dim_feedforward=dim_feedforward, dropout=dropout, activation=activation)
+
+    # Classifier
+    self.cls = nn.Linear(d_model, len_vocab)
+
+    self.init_weights()
+
+  def init_weights(self) -> None:
+    initrange = 0.1
+    self.cls.bias.data.zero_()
+    self.cls.weight.data.uniform_(-initrange, initrange)
+    
+  # src: Voices[B, 1, T] , tgt: Texts[B, L] -> [B, S, len_vocab]
+  def forward(self, src, tgt):  
+    with torch.no_grad():
+      # in: [B, 1, T=(List of air_pressure in time)]
+      # out: [B, 1, n_mels, time_frames]
+      # 221341 / 22050 * 16000 / hop_length(256) ~= 804
+      # 128 is n_mels by default
+      # in: [64, 1, 221341] -> out: [64, 1, 128, 804]
+      src = self.voice_transform(src)
+    
+    #if self.cnn_mode == 'resnet':
+    # [64, 1, 128, 804] -> [64, 3, 128, 804]
+    #  x = x.repeat(1, 3, 1, 1) 
+    # print("8", x.shape)
+    
+    # in: [B , C,  F , T]   ----------> out: [B,  C', F',  T']
+    # in: [64, 1, 128, 804] --CNN2D---> out: [64, 64, 32, 402]
+    # in: [64, 1, 128, 804] -ResNet18-> out: [64, 32, 32, 402]
+    src = self.cnn(src)       
+
+    # B(batch_size), C(num_channels), 
+    # F(freq_bins) , S(seq_len) = embedding dimension
+    B, C, F, S = src.shape
+    # or src = src.permute(3, 0, 1, 2).contiguous().view(b, s, c*d)
+    src = src.reshape(B, -1, S) # [B, C, F, S] -> [B, C*F, S]
+    src = src.permute(2, 0, 1)  # [B, C*F, S]  -> [S, B, D(C*F)]
+    
+    print("srcaaaaaaaa", src.shape) # [S, B, D] [404, 64, 1024]
+    print("tgtaaaaaaaa", tgt.shape) # [B, L]    [64, 159]
+    
+    # in: (src: [S, B, D], # tgt: [B, L]) -> out: [S, B, D]
+    out = self.transformers(src, tgt) 
+    
+    # in: [S, B, D] -> [B, S, D]
+    out = out.permute(1, 0, 2)
+
+    # in: [B, S, D] -> out: [B, S, len_vocab]
+    out = self.cls(out)
+    return out
+
+"""
+batch = next(iter(train_loader))
+batch[0].shape
+batch[1].shape
+"""
+
+batch = next(iter(test_loader))
+batch[0].shape
+batch[1].shape
+
+model = Speech2Text(len_vocab=43, d_model=1024 , n_head=4, num_encoders=3, num_decoders=3,
+                    dim_feedforward=512, dropout=0.1, activation=F.relu,
+                    sample_rate=22050).to(device)
+
+torch.cuda.empty_cache()
+
+y = model(batch[0].to(device), batch[1].to(device))
+y.shape # [64, 1, 128, 768]
+
+
+x = tensor(np.arange(1280), dtype=torch.float32).view(1,1,128,10) # [4, 1, 128, 10]
+x.shape
+
+model = nn.Conv2d(1, 64, kernel_size=11, stride=1, padding=5)
+y = model(x)
+y.shape # [1, 64, 128, 10]
+
+model = CNN2DFeatureExtractor()
+y = model(x)
+
+
+
+
+model = ResNetFeatureExtractor().to(device)
+with torch.no_grad():
+  out = model(torch.randn((2, 3, 80, 796), device=device))
+out.shape
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
